@@ -133,6 +133,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Ошибка в боте: {e}")
         await update.message.reply_text("ой, чето связь подлагивает... повтори еще раз :)")
 
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_health_check():
+    # Render передаёт порт в переменную PORT, по умолчанию берем 10000
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+# Запускаем пинг-сервер в отдельном потоке перед стартом бота
+Thread(target=run_health_check, daemon=True).start()
+
 if __name__ == "__main__":
     init_db()
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
