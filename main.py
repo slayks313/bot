@@ -138,19 +138,51 @@ def get_relevant_memories(query):
         print(f"Ошибка получения памяти из Supabase: {e}")
     return ""
 # --- ГЕНЕРАЦИЯ ОТВЕТА ---
+def split_reply_into_messages(text: str):
+    text = text.strip()
+    if not text:
+        return []
+
+    # Сначала делим по явным абзацам
+    paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
+    if len(paragraphs) > 1:
+        return paragraphs
+
+    # Иначе делим по предложениям
+    sentences = re.findall(r'[^.!?…]+[.!?…]?(?=\s|$)', text, flags=re.S)
+    messages = []
+    current = ""
+    for sentence in sentences:
+        part = sentence.strip()
+        if not part:
+            continue
+        if not current:
+            current = part
+            continue
+        if len(current) + 1 + len(part) <= 4000:
+            current = f"{current} {part}"
+        else:
+            messages.append(current)
+            current = part
+    if current:
+        messages.append(current)
+
+    return messages if len(messages) > 1 else [text]
+
+
 async def generate_response(user_text, update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_history
-    
+
     # 1. Формируем контекст памяти
     memories = get_relevant_memories(user_text)
     memory_context = f"\n[Факты о Slayks: {memories}]" if memories else ""
     current_system_prompt = SYSTEM_PROMPT + memory_context
-    
+
     # 2. Собираем сообщения
     messages = [{"role": "system", "content": current_system_prompt}]
     messages.extend(chat_history)
     messages.append({"role": "user", "content": user_text})
-    
+
     # 3. Запрос к Groq
     completion = await client.chat.completions.create(
         model=MODEL,
@@ -158,7 +190,7 @@ async def generate_response(user_text, update: Update, context: ContextTypes.DEF
         temperature=0.6,
         max_tokens=250
     )
-    
+
     full_reply = completion.choices[0].message.content
     print(f"[Ответ Groq]: {full_reply}")
 
@@ -172,38 +204,39 @@ async def generate_response(user_text, update: Update, context: ContextTypes.DEF
 
     if match:
         split_pos = match.start()
-        
+
         # Текст ДО промпта (например: "ладно, вот... 🙂")
         text_reply = full_reply[:split_pos].strip()
-        
+
         # Сам промпт ПОСЛЕ найденного совпадения
         photo_prompt = full_reply[split_pos:].strip()
-        
+
         # Если совпал сам маркер, убираем его из начала промпта
         photo_prompt = re.sub(r'^(фото_промпт:|photo prompt:|prompt:)\s*', '', photo_prompt, flags=re.IGNORECASE).strip()
-        
+
         # Сохраняем чистый текст ассистента в историю
         history_text = text_reply if text_reply else "согласилась скинуть фото"
         chat_history.append({"role": "assistant", "content": history_text})
-        
+
         # Отправляем фразу пользователю
         message_to_send = text_reply if text_reply else "ой, сейчас попробую... 😉"
         await update.message.reply_text(message_to_send)
-        
+
         # Генерируем и шлем фото
         asyncio.create_task(generate_and_send_photo(update, context, photo_prompt, ""))
-        
+
         result = None
     else:
         # Обычный текст
         chat_history.append({"role": "assistant", "content": full_reply})
-        result = full_reply
+        result = split_reply_into_messages(full_reply)
 
     # 5. Обрезаем историю
     if len(chat_history) > MAX_HISTORY * 2:
         chat_history = chat_history[-MAX_HISTORY * 2:]
 
     return result
+
 
 # --- ХЭНДЛЕРЫ TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,8 +253,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         reply = await generate_response(user_text, update, context)
-        if reply: # Отправляем текст только если reply не None
-            await update.message.reply_text(reply)
+        if reply:
+            if isinstance(reply, list):
+                for part in reply:
+                    await update.message.reply_text(part)
+            else:
+                await update.message.reply_text(reply)
     except Exception as e:
         print(f"Ошибка в боте: {e}")
         await update.message.reply_text("ой, чето связь подлагивает... повтори еще раз :)")
@@ -247,5 +284,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 Мила запущен и готова генерировать селфи 24/7!")
+    print("🚀 Мила запущен")
     app.run_polling()
