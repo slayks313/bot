@@ -3,6 +3,7 @@ import re
 import os
 import asyncio
 import io
+import random
 import aiohttp
 from groq import AsyncGroq
 from supabase import create_client, Client
@@ -137,6 +138,41 @@ def get_relevant_memories(query):
     except Exception as e:
         print(f"Ошибка получения памяти из Supabase: {e}")
     return ""
+
+REACTION_PATTERNS = [
+    (re.compile(r'\b(спасибо|ты лучшая|ты красивая|ты классная|ты прекрасн|ты мила|люблю тебя|мне нравится|комплимент|ты супер|ты красавица|ты самая)\b', re.I), "😘"),
+    (re.compile(r'\b(грустн|плохо|печаль|печально|сожал|слез|плохие новости|тяжело|нет сил|расстроен|разочарован|одинок|болит|депрес|крич)\b', re.I), "🥺"),
+    (re.compile(r'\b(отлично|супер|классно|удач|праздник|радост|радостно|везет|успех|побед|получил|нашел|хорошие новости|хорошо|праздник|счастлив|весел|люблю|улыбка)\b', re.I), "😊"),
+]
+
+
+def detect_reaction(text: str):
+    if len(text.strip()) < 4:
+        return None
+    for pattern, emoji in REACTION_PATTERNS:
+        if pattern.search(text):
+            return emoji
+    return None
+
+
+async def maybe_send_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
+    reaction = detect_reaction(user_text)
+    if not reaction:
+        return
+
+    # Не реагировать на каждое сообщение, а только на заметные
+    if random.random() > 0.55:
+        return
+
+    try:
+        await update.message.reply_text(
+            reaction,
+            reply_to_message_id=update.message.message_id,
+            protect_content=False
+        )
+    except Exception as e:
+        print(f"Ошибка отправки реакции: {e}")
+
 # --- ГЕНЕРАЦИЯ ОТВЕТА ---
 async def generate_response(user_text, update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_history
@@ -219,6 +255,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
     
     try:
+        await maybe_send_reaction(update, context, user_text)
         reply = await generate_response(user_text, update, context)
         if reply: # Отправляем текст только если reply не None
             await update.message.reply_text(reply)
@@ -247,5 +284,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 Мила запущен и готова генерировать селфи 24/7!")
+    print("🚀 Мила запущен")
     app.run_polling()
