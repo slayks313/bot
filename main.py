@@ -59,45 +59,60 @@ SYSTEM_PROMPT = """Ты — девушка по имени Мила. Тебе 19
 chat_history = []
 MAX_HISTORY = 10
 
-HF_TOKEN = os.getenv("HF_TOKEN")
-# Модель FLUX.1-schnell — супер-быстрая и очень точная по анатомии
-HF_API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
-
+# --- РАБОТА С ГЕНЕРАЦИЕЙ ФОТО ---
 async def generate_and_send_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, caption: str):
-    try:
-        clean_prompt = prompt.replace("фото_промпт:", "").strip()
-        print(f"[Запрос к HuggingFace FLUX]: {clean_prompt}")
+    clean_prompt = prompt.replace("фото_промпт:", "").strip()
+    print(f"[Промпт генерации]: {clean_prompt}")
+    
+    image_bytes = None
 
-        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-        payload = {
-            "inputs": clean_prompt,
-            "parameters": {
-                "width": 800,
-                "height": 1024,
-                "num_inference_steps": 4 # Schnell работает за 4 шага очень детально
+    # Попытка 1: Запрос к Hugging Face Inference Router
+    if HF_TOKEN:
+        try:
+            hf_url = "https://router.huggingface.co/hf-inference/v1/images/generations"
+            headers = {
+                "Authorization": f"Bearer {HF_TOKEN}",
+                "Content-Type": "json"
             }
-        }
+            # Используем быструю аниме/SDXL модель на Hugging Face
+            payload = {
+                "model": "cagliostrolab/animagine-xl-3.1",
+                "inputs": clean_prompt,
+                "parameters": {
+                    "width": 800,
+                    "height": 1024
+                }
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(hf_url, headers=headers, json=payload, timeout=30) as response:
+                    if response.status == 200:
+                        image_bytes = await response.read()
+                        print("[Успешно]: Изображение получено через Hugging Face")
+                    else:
+                        err_body = await response.text()
+                        print(f"[HF Ошибка {response.status}]: {err_body}")
+        except Exception as e:
+            print(f"[Ошибка HF]: {e}")
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(HF_API_URL, headers=headers, json=payload, timeout=40) as response:
-                if response.status == 200:
-                    image_bytes = await response.read()
-                    photo_file = io.BytesIO(image_bytes)
-                    photo_file.name = "mila_art.jpg"
-                    
-                    await context.bot.send_photo(
-                        chat_id=update.effective_chat.id, 
-                        photo=photo_file, 
-                        caption=caption,
-                        parse_mode=constants.ParseMode.HTML
-                    )
-                else:
-                    error_text = await response.text()
-                    print(f"Ошибка HF API ({response.status}): {error_text}")
-                    await update.message.reply_text("ой, чето камера залагала... повтори еще раз чуть позже :)", protect_content=False)
-    except Exception as e:
-        print(f"Ошибка генерации/отправки фото: {e}")
-        await update.message.reply_text("что-то пошло не так с фото, Slayks... :(", protect_content=False)
+    # Попытка 2: Резервный сервер Pollinations (Flux Anime)
+    
+    # Отправка фото в Telegram
+    if image_bytes and len(image_bytes) > 2000:
+        try:
+            photo_file = io.BytesIO(image_bytes)
+            photo_file.name = "mila_art.jpg"
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id, 
+                photo=photo_file, 
+                caption=caption,
+                parse_mode=constants.ParseMode.HTML
+            )
+            return
+        except Exception as e:
+            print(f"[Ошибка отправки в Telegram]: {e}")
+
+    # Если оба метода не сработали
+    await update.message.reply_text("ой, чето камера залагала... не могу сейчас скинуть :(", protect_content=False)
 
 # --- РАБОТА С ПАМЯТЬЮ (SUPABASE) --- (Закомментировано, если не используешь)
 def save_memory(topic, fact, emotion=""):
