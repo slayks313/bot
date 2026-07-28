@@ -150,24 +150,30 @@ def split_reply_into_messages(text: str):
 
     # Иначе делим по предложениям
     sentences = re.findall(r'[^.!?…]+[.!?…]?(?=\s|$)', text, flags=re.S)
-    messages = []
-    current = ""
-    for sentence in sentences:
-        part = sentence.strip()
-        if not part:
-            continue
-        if not current:
-            current = part
-            continue
-        if len(current) + 1 + len(part) <= 4000:
-            current = f"{current} {part}"
-        else:
-            messages.append(current)
-            current = part
-    if current:
-        messages.append(current)
+    if len(sentences) > 1:
+        messages = [s.strip() for s in sentences if s.strip()]
+        return messages
 
-    return messages if len(messages) > 1 else [text]
+    # Если всё ещё одна длинная строка, делим по словам, чтобы сделать несколько сообщений
+    if len(text) > 120:
+        words = text.split()
+        chunks = []
+        current = ""
+        for word in words:
+            if not current:
+                current = word
+                continue
+            if len(current) + 1 + len(word) <= 120:
+                current = f"{current} {word}"
+            else:
+                chunks.append(current)
+                current = word
+        if current:
+            chunks.append(current)
+        if len(chunks) > 1:
+            return chunks
+
+    return [text]
 
 
 async def generate_response(user_text, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -254,11 +260,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         reply = await generate_response(user_text, update, context)
         if reply:
-            if isinstance(reply, list):
-                for part in reply:
-                    await update.message.reply_text(part)
-            else:
-                await update.message.reply_text(reply)
+            parts = reply if isinstance(reply, list) else split_reply_into_messages(reply)
+            for part in parts:
+                await update.message.reply_text(part)
     except Exception as e:
         print(f"Ошибка в боте: {e}")
         await update.message.reply_text("ой, чето связь подлагивает... повтори еще раз :)")
