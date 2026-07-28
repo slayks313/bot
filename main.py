@@ -1,13 +1,10 @@
 import logging
 import re
 import os
-import time
 import asyncio
 import io
 import random
-import traceback
 import aiohttp
-import groq
 from groq import AsyncGroq
 from supabase import create_client, Client
 from telegram import Update, constants
@@ -62,9 +59,6 @@ SYSTEM_PROMPT = """Ты — девушка по имени Мила. Тебе 19
 
 chat_history = []
 MAX_HISTORY = 10
-REQUEST_WINDOW = 60
-REQUEST_LIMIT = 4
-chat_request_history = {}
 
 # --- РАБОТА С ГЕНЕРАЦИЕЙ ФОТО ---
 async def generate_and_send_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, caption: str):
@@ -144,125 +138,64 @@ def get_relevant_memories(query):
     except Exception as e:
         print(f"Ошибка получения памяти из Supabase: {e}")
     return ""
+
+REACTION_PATTERNS = [
+    (re.compile(r'\b(спасибо|ты лучшая|ты красивая|ты классная|ты прекрасн|ты мила|люблю тебя|мне нравится|комплимент|ты супер|ты красавица|ты самая)\b', re.I), "😘"),
+    (re.compile(r'\b(грустн|плохо|печаль|печально|сожал|слез|плохие новости|тяжело|нет сил|расстроен|разочарован|одинок|болит|депрес|крич)\b', re.I), "🥺"),
+    (re.compile(r'\b(отлично|супер|классно|удач|праздник|радост|радостно|везет|успех|побед|получил|нашел|хорошие новости|хорошо|праздник|счастлив|весел|люблю|улыбка)\b', re.I), "😊"),
+]
+
+
+def detect_reaction(text: str):
+    if len(text.strip()) < 4:
+        return None
+    for pattern, emoji in REACTION_PATTERNS:
+        if pattern.search(text):
+            return emoji
+    return None
+
+
+async def maybe_send_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
+    reaction = detect_reaction(user_text)
+    if not reaction:
+        return
+
+    # Не реагировать на каждое сообщение, а только на заметные
+    if random.random() > 0.55:
+        return
+
+    try:
+        await update.message.reply_text(
+            reaction,
+            reply_to_message_id=update.message.message_id,
+            protect_content=False
+        )
+    except Exception as e:
+        print(f"Ошибка отправки реакции: {e}")
+
 # --- ГЕНЕРАЦИЯ ОТВЕТА ---
-def reduce_emoji_count(text: str) -> str:
-    emojis = ["❤️", "😉", "🥰", "😏", "🙂", "😊", "😳", "😅", "😜", "😘", "😇", "😈", "😌", "😔", "😴", "🥲", "😒", "😞", "😂", "🤭", "😍"]
-    pattern = re.compile("|".join(map(re.escape, emojis)))
-    found = pattern.findall(text)
-    if len(found) <= 1:
-        return text
-
-    first = found[0]
-    text = pattern.sub("", text)
-    text = f"{first} {text}".strip()
-    return text
-
-
-def trim_trailing_fragment(text: str) -> str:
-    text = re.sub(r'(\s*[,;:-]?\s*\b(и ещё сообщение|и еще сообщение|и ещё|и еще|ещё|еще|и|а|ну|так)\b\s*)+$', '', text, flags=re.IGNORECASE)
-    return text.strip()
-
-
-def clean_reply_text(text: str) -> str:
-    text = text.strip()
-    text = trim_trailing_fragment(text)
-    text = reduce_emoji_count(text)
-    return text
-
-
-def finish_chunk_naturally(chunk: str, is_last: bool) -> str:
-    chunk = chunk.strip()
-    if not is_last and len(chunk) > 30 and not re.search(r'[.!?…]$', chunk):
-        if random.random() < 0.45:
-            return chunk + "..."
-    return chunk
-
-
-def split_reply_into_messages(text: str):
-    text = clean_reply_text(text)
-    if not text:
-        return []
-
-    # Сначала делим по явным абзацам
-    paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
-    if len(paragraphs) > 1:
-        return [finish_chunk_naturally(p, i == len(paragraphs) - 1) for i, p in enumerate(paragraphs)]
-
-    # Иначе делим по предложениям
-    sentences = [s.strip() for s in re.findall(r'[^.!?…]+[.!?…]?(?=\s|$)', text, flags=re.S) if s.strip()]
-    if len(sentences) > 1:
-        return [finish_chunk_naturally(s, i == len(sentences) - 1) for i, s in enumerate(sentences)]
-
-    # Если есть длинная строка, разбиваем логично по запятым или союзам
-    if len(text) > 80:
-        split_point = None
-        for pattern in [r',\s*', r'\s+и\s+', r'\s+а\s+', r'\s+но\s+']:
-            for m in re.finditer(pattern, text):
-                if 30 < m.start() < len(text) - 30:
-                    split_point = m.start() + 1
-        if split_point:
-            first = text[:split_point].strip()
-            second = text[split_point:].strip()
-            if first and second:
-                return [finish_chunk_naturally(first, False), finish_chunk_naturally(second, True)]
-
-    # Иначе делим по словам, чтобы сделать несколько сообщений
-    if len(text) > 120:
-        words = text.split()
-        chunks = []
-        current = ""
-        for word in words:
-            if not current:
-                current = word
-                continue
-            if len(current) + 1 + len(word) <= 120:
-                current = f"{current} {word}"
-            else:
-                chunks.append(current)
-                current = word
-        if current:
-            chunks.append(current)
-        if len(chunks) > 1:
-            return [finish_chunk_naturally(chunk, i == len(chunks) - 1) for i, chunk in enumerate(chunks)]
-
-    return [text]
-
-
 async def generate_response(user_text, update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_history
-
+    
     # 1. Формируем контекст памяти
     memories = get_relevant_memories(user_text)
     memory_context = f"\n[Факты о Slayks: {memories}]" if memories else ""
     current_system_prompt = SYSTEM_PROMPT + memory_context
-
+    
     # 2. Собираем сообщения
     messages = [{"role": "system", "content": current_system_prompt}]
     messages.extend(chat_history)
     messages.append({"role": "user", "content": user_text})
-
+    
     # 3. Запрос к Groq
-    try:
-        completion = await client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0.5,
-            max_tokens=180
-        )
-        full_reply = completion.choices[0].message.content if completion.choices else ""
-    except groq.RateLimitError as e:
-        print(f"Rate limit Groq: {e}")
-        traceback.print_exc()
-        return ["сейчас лимит на запросы закончился, подожди пару минут и напиши снова"]
-    except Exception as e:
-        print(f"Ошибка запроса к Groq: {e}")
-        traceback.print_exc()
-        return ["эм, чето связь с генерацией подлагивает... попробуй еще раз чуть позже"]
-
-    if not full_reply:
-        print("[Ответ Groq]: пустой ответ")
-        return ["эм, я пока ни чего не дописала... напиши еще раз, пожалуйста"]
-
+    completion = await client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        temperature=0.6,
+        max_tokens=250
+    )
+    
+    full_reply = completion.choices[0].message.content
     print(f"[Ответ Groq]: {full_reply}")
 
     # 4. Фиксируем запрос юзера в истории
@@ -275,32 +208,32 @@ async def generate_response(user_text, update: Update, context: ContextTypes.DEF
 
     if match:
         split_pos = match.start()
-
+        
         # Текст ДО промпта (например: "ладно, вот... 🙂")
         text_reply = full_reply[:split_pos].strip()
-
+        
         # Сам промпт ПОСЛЕ найденного совпадения
         photo_prompt = full_reply[split_pos:].strip()
-
+        
         # Если совпал сам маркер, убираем его из начала промпта
         photo_prompt = re.sub(r'^(фото_промпт:|photo prompt:|prompt:)\s*', '', photo_prompt, flags=re.IGNORECASE).strip()
-
+        
         # Сохраняем чистый текст ассистента в историю
         history_text = text_reply if text_reply else "согласилась скинуть фото"
         chat_history.append({"role": "assistant", "content": history_text})
-
+        
         # Отправляем фразу пользователю
         message_to_send = text_reply if text_reply else "ой, сейчас попробую... 😉"
         await update.message.reply_text(message_to_send)
-
+        
         # Генерируем и шлем фото
         asyncio.create_task(generate_and_send_photo(update, context, photo_prompt, ""))
-
+        
         result = None
     else:
         # Обычный текст
         chat_history.append({"role": "assistant", "content": full_reply})
-        result = split_reply_into_messages(full_reply)
+        result = full_reply
 
     # 5. Обрезаем историю
     if len(chat_history) > MAX_HISTORY * 2:
@@ -308,19 +241,11 @@ async def generate_response(user_text, update: Update, context: ContextTypes.DEF
 
     return result
 
-
 # --- ХЭНДЛЕРЫ TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_history
     chat_history = []
     await update.message.reply_text("привееет) ты чего так долго не писал? скучала по тебе 🥰")
-
-async def send_split_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, parts):
-    for part in parts:
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
-        await asyncio.sleep(random.uniform(1.0, 2.0))
-        await update.message.reply_text(part)
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
@@ -329,28 +254,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
     
-    chat_id = update.effective_chat.id
-    now_ts = time.time()
-    window = chat_request_history.get(chat_id, [])
-    window = [ts for ts in window if now_ts - ts < REQUEST_WINDOW]
-    if len(window) >= REQUEST_LIMIT:
-        await update.message.reply_text("слишком часто, подожди секунду и напиши снова")
-        return
-    window.append(now_ts)
-    chat_request_history[chat_id] = window
-
-    try:
-        reply = await generate_response(user_text, update, context)
-        if reply:
-            parts = reply if isinstance(reply, list) else split_reply_into_messages(reply)
-            await send_split_reply(update, context, parts)
+    try:        await maybe_send_reaction(update, context, user_text)        reply = await generate_response(user_text, update, context)
+        if reply: # Отправляем текст только если reply не None
+            await update.message.reply_text(reply)
     except Exception as e:
         print(f"Ошибка в боте: {e}")
-        traceback.print_exc()
-        try:
-            await update.message.reply_text("ой, чето связь подлагивает... повтори еще раз :(")
-        except Exception:
-            traceback.print_exc()
+        await update.message.reply_text("ой, чето связь подлагивает... повтори еще раз :)")
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
