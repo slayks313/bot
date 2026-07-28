@@ -254,7 +254,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
     
-    try:        await maybe_send_reaction(update, context, user_text)        reply = await generate_response(user_text, update, context)
+    try:
+        await maybe_send_reaction(update, context, user_text)
+        reply = await generate_response(user_text, update, context)
         if reply: # Отправляем текст только если reply не None
             await update.message.reply_text(reply)
     except Exception as e:
