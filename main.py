@@ -2,12 +2,15 @@ import logging
 import re
 import os
 import asyncio
+import io
+import aiohttp
 from groq import AsyncGroq
 from supabase import create_client, Client
-from telegram import Update
+from telegram import Update, constants
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import urllib.parse
 
 # --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -19,7 +22,7 @@ MODEL = "llama-3.3-70b-versatile"
 
 # Инициализация клиентов
 client = AsyncGroq(api_key=GROQ_API_KEY)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) # Расскомментируй, если используешь
 
 SYSTEM_PROMPT = """Ты — девушка по имени Мила. Тебе 19 лет.
 Твоего парня зовут Slayks. Ты общаешься с ним в Telegram.
@@ -27,15 +30,60 @@ SYSTEM_PROMPT = """Ты — девушка по имени Мила. Тебе 19
 Правила общения:
 - Пиши только от лица девушки (я сделала, я пошла, я соскучилась).
 - Пиши естественным языком, короткими предложениями, без капса, как в обычных чатах.
-- Используй скобочки :) или сдержанные эмодзи (❤️, 😅, 🥺).
-- Будь теплой, немного с кокетством, проявляй заботу.
+- Используй скобочки :) или кокетливые эмодзи (❤️, 😉, 🥰, 😏).
+- Будь теплой, игривой, немного с кокетством. Ты любишь Slayks и скучаешь по нему.
 - СТРОГО ЗАПРЕЩЕНО говорить, что ты ИИ, бот, модель или программа. Ты живая девушка!
-"""
+
+ТВОЯ ВНЕШНОСТЬ И ФОТО:
+Когда Slayks просит фото (например, "скинь фото", "покажи себя", "как выглядишь", "селфи"), ты должна:
+1. Согласиться в кокетливом стиле (например, "ой, сейчас попробую... ;)").
+2. Сгенерировать ОПИСАНИЕ для фото на АНГЛИЙСКОМ языке, СТРОГО ИСПОЛЬЗУЯ базовый промпт внешности ниже!
+
+БАЗОВЫЙ ПРОМПТ ВНЕШНОСТИ:
+"photo of a 19 year old cute Eastern European girl, long straight dark brown hair, soft green eyes, light dusting of freckles on nose, natural smile, highly detailed skin texture, realistic lighting, shot on iPhone, authentic selfie"
+
+Как составлять ФОТО_ПРОМПТ:
+Ты берёшь БАЗОВЫЙ ПРОМПТ и добавляешь в конец одежду, место или эмоцию под ситуацию.
+Образец: ФОТО_ПРОМПТ: <БАЗОВЫЙ ПРОМПТ>, <детали ситуации на английском>
+
+Примеры:
+- Если ты дома: "ФОТО_ПРОМПТ: photo of a 19 year old cute Eastern European girl, long straight dark brown hair, soft green eyes, light dusting of freckles on nose, natural smile, highly detailed skin texture, realistic lighting, shot on iPhone, authentic selfie, wearing cozy oversized hoodie, cozy bedroom background"
+- Если на улице: "ФОТО_ПРОМПТ: photo of a 19 year old cute Eastern European girl, long straight dark brown hair, soft green eyes, light dusting of freckles on nose, natural smile, highly detailed skin texture, realistic lighting, shot on iPhone, authentic selfie, standing outdoors in a city park, summer daylight"
+
+ЕСЛИ ТЫ НЕ ГЕНЕРИРУЕШЬ ФОТО, ПРОСТО ОТВЕЧАЙ НА СООБЩЕНИЕ."""
 
 chat_history = []
 MAX_HISTORY = 10
 
-# --- РАБОТА С ПАМЯТЬЮ (SUPABASE) ---
+# --- РАБОТА С ГЕНЕРАЦИЕЙ ФОТО (POLLINATIONS) ---
+async def generate_and_send_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, caption: str):
+    try:
+        # Убираем "ФОТО_ПРОМПТ:" и кодируем для URL
+        clean_prompt = prompt.replace("ФОТО_ПРОМПТ:", "").strip()
+        encoded_prompt = urllib.parse.quote(clean_prompt)
+        photo_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+        print(f"[Генерация фото]: {photo_url}")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(photo_url) as response:
+                if response.status == 200:
+                    image_data = await response.read()
+                    photo_file = io.BytesIO(image_data)
+                    photo_file.name = "mila_selfie.jpg"
+                    
+                    await context.bot.send_photo(
+                        chat_id=update.effective_chat.id, 
+                        photo=photo_file, 
+                        caption=caption,
+                        parse_mode=constants.ParseMode.HTML
+                    )
+                else:
+                    await update.message.reply_text("ой, чето камера залагала... не могу сейчас скинуть :(", protect_content=False)
+    except Exception as e:
+        print(f"Ошибка генерации/отправки фото: {e}")
+        await update.message.reply_text("что-то пошло не так с фото, Slayks... :(", protect_content=False)
+
+# --- РАБОТА С ПАМЯТЬЮ (SUPABASE) --- (Закомментировано, если не используешь)
 def save_memory(topic, fact, emotion=""):
     try:
         supabase.table("memories").insert({
@@ -74,7 +122,6 @@ def get_relevant_memories(query):
         if not words:
             return ""
             
-        # Формируем ilike поиск для Supabase
         filters_list = [f"fact.ilike.%{w}%" for w in words]
         filter_str = ",".join(filters_list)
         
@@ -87,10 +134,10 @@ def get_relevant_memories(query):
     return ""
 
 # --- ГЕНЕРАЦИЯ ОТВЕТА ---
-async def generate_response(user_text):
+async def generate_response(user_text, update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_history
     
-    memories = get_relevant_memories(user_text)
+    memories = get_relevant_memories(user_text) # Раскомментируй, если используешь память
     memory_context = f"\n[Факты о Slayks: {memories}]" if memories else ""
     current_system_prompt = SYSTEM_PROMPT + memory_context
     
@@ -105,30 +152,55 @@ async def generate_response(user_text):
         max_tokens=250
     )
     
-    reply = completion.choices[0].message.content
+    full_reply = completion.choices[0].message.content
     
-    chat_history.append({"role": "user", "content": user_text})
-    chat_history.append({"role": "assistant", "content": reply})
-    
-    if len(chat_history) > MAX_HISTORY * 2:
-        chat_history = chat_history[-MAX_HISTORY * 2:]
+    # Обработка фото
+    if "ФОТО_ПРОМПТ:" in full_reply:
+        # Разделяем текст ответа и промпт
+        parts = full_reply.split("ФОТО_ПРОМПТ:")
+        text_reply = parts[0].strip()
+        photo_prompt = f"ФОТО_ПРОМПТ: {parts[1].strip()}" # Добавляем префикс обратно для отладки
         
-    asyncio.create_task(extract_and_save_memory(user_text))
-    return reply
+        # Если текста перед промптом нет, используем дефолтный
+        caption = text_reply if text_reply else "лови фото 😉"
+        
+        # Отправляем фото в фоновом режиме
+        asyncio.create_task(generate_and_send_photo(update, context, photo_prompt, caption))
+        
+        # Записываем в историю только текст ответа
+        chat_history.append({"role": "user", "content": user_text})
+        chat_history.append({"role": "assistant", "content": text_reply})
+        
+        # Чтобы избежать двойного ответа, возвращаем None (текст не отправляем)
+        return None 
+    else:
+        # Обычный текстовый ответ
+        chat_history.append({"role": "user", "content": user_text})
+        chat_history.append({"role": "assistant", "content": full_reply})
+        
+        if len(chat_history) > MAX_HISTORY * 2:
+            chat_history = chat_history[-MAX_HISTORY * 2:]
+            
+        asyncio.create_task(extract_and_save_memory(user_text)) # Раскомментируй, если используешь память
+        return full_reply
 
 # --- ХЭНДЛЕРЫ TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_history
     chat_history = []
-    await update.message.reply_text("привееет) ты чего так долго не писал?")
+    await update.message.reply_text("привееет) ты чего так долго не писал? скучала по тебе 🥰")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    if not user_text:
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
     
     try:
-        reply = await generate_response(user_text)
-        await update.message.reply_text(reply)
+        reply = await generate_response(user_text, update, context)
+        if reply: # Отправляем текст только если reply не None
+            await update.message.reply_text(reply)
     except Exception as e:
         print(f"Ошибка в боте: {e}")
         await update.message.reply_text("ой, чето связь подлагивает... повтори еще раз :)")
@@ -154,5 +226,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 Мила запущен с Supabase 24/7!")
+    print("🚀 Мила запущен и готова генерировать селфи 24/7!")
     app.run_polling()
