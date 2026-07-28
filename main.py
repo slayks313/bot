@@ -4,6 +4,7 @@ import os
 import asyncio
 import io
 import random
+import traceback
 import aiohttp
 from groq import AsyncGroq
 from supabase import create_client, Client
@@ -236,14 +237,23 @@ async def generate_response(user_text, update: Update, context: ContextTypes.DEF
     messages.append({"role": "user", "content": user_text})
 
     # 3. Запрос к Groq
-    completion = await client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0.6,
-        max_tokens=250
-    )
+    try:
+        completion = await client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.6,
+            max_tokens=250
+        )
+        full_reply = completion.choices[0].message.content if completion.choices else ""
+    except Exception as e:
+        print(f"Ошибка запроса к Groq: {e}")
+        traceback.print_exc()
+        return ["эм, чето связь с генерацией подлагивает... попробуй еще раз чуть позже"]
 
-    full_reply = completion.choices[0].message.content
+    if not full_reply:
+        print("[Ответ Groq]: пустой ответ")
+        return ["эм, я пока ни чего не дописала... напиши еще раз, пожалуйста"]
+
     print(f"[Ответ Groq]: {full_reply}")
 
     # 4. Фиксируем запрос юзера в истории
@@ -317,7 +327,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_split_reply(update, context, parts)
     except Exception as e:
         print(f"Ошибка в боте: {e}")
-        await update.message.reply_text("ой, чето связь подлагивает... повтори еще раз :)")
+        traceback.print_exc()
+        try:
+            await update.message.reply_text("ой, чето связь подлагивает... повтори еще раз :(")
+        except Exception:
+            traceback.print_exc()
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
