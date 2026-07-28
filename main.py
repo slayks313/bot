@@ -65,7 +65,7 @@ async def generate_and_send_photo(update: Update, context: ContextTypes.DEFAULT_
         
         # Используем модель flux-realism (или flux-anime если нужен аниме стиль)
         # width=1024, height=1280 (формат портрета/селфи 4:5), seed=random для разнообразия
-        photo_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux-realism&width=1024&height=1280&nologo=true"
+        photo_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux-anime&width=1024&height=1280&nologo=true"
         print(f"[Генерация фото]: {photo_url}")
 
         async with aiohttp.ClientSession() as session:
