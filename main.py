@@ -132,8 +132,7 @@ def get_relevant_memories(query):
     except Exception as e:
         print(f"Ошибка получения памяти из Supabase: {e}")
     return ""
-
-# --- ИСПРАВЛЕННАЯ АСИНХРОННАЯ ФУНКЦИЯ ГЕНЕРАЦИИ ОТВЕТА ---
+# --- ГЕНЕРАЦИЯ ОТВЕТА ---
 async def generate_response(user_text, update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_history
     
@@ -142,12 +141,12 @@ async def generate_response(user_text, update: Update, context: ContextTypes.DEF
     memory_context = f"\n[Факты о Slayks: {memories}]" if memories else ""
     current_system_prompt = SYSTEM_PROMPT + memory_context
     
-    # 2. Собираем сообщения для запроса к LLM
+    # 2. Собираем сообщения
     messages = [{"role": "system", "content": current_system_prompt}]
     messages.extend(chat_history)
     messages.append({"role": "user", "content": user_text})
     
-    # 3. Запрос к API
+    # 3. Запрос к Groq
     completion = await client.chat.completions.create(
         model=MODEL,
         messages=messages,
@@ -158,41 +157,49 @@ async def generate_response(user_text, update: Update, context: ContextTypes.DEF
     full_reply = completion.choices[0].message.content
     print(f"[Ответ Groq]: {full_reply}")
 
-    # 4. Обновляем историю запросом пользователя (один раз)
+    # 4. Фиксируем запрос юзера в истории
     chat_history.append({"role": "user", "content": user_text})
 
-    # --- ИЩЕМ МАРКЕР ФОТО ---
-    photo_marker = "фото_промпт:"
-    
-    if photo_marker in full_reply.lower():
-        # Разделяем текст ответа и промпт
-        parts = re.split(re.escape(photo_marker), full_reply, flags=re.IGNORECASE)
+    # --- УЛУЧШЕННЫЙ ПОИСК МАРКЕРА ИЛИ ПРОМПТА ---
+    # Ищет "фото_промпт:", "photo prompt:", "prompt:" или начало английского промпта "photo of..."
+    pattern = r'(фото_промпт:|photo prompt:|prompt:|\bphoto of\b)'
+    match = re.search(pattern, full_reply, flags=re.IGNORECASE)
+
+    if match:
+        split_pos = match.start()
         
-        text_reply = parts[0].strip()
-        photo_prompt = parts[1].strip()
+        # Текст ДО промпта (например: "ладно, вот... 🙂")
+        text_reply = full_reply[:split_pos].strip()
         
-        # Записываем в историю только текст ответа ассистента
+        # Сам промпт ПОСЛЕ найденного совпадения
+        photo_prompt = full_reply[split_pos:].strip()
+        
+        # Если совпал сам маркер, убираем его из начала промпта
+        photo_prompt = re.sub(r'^(фото_промпт:|photo prompt:|prompt:)\s*', '', photo_prompt, flags=re.IGNORECASE).strip()
+        
+        # Сохраняем чистый текст ассистента в историю
         history_text = text_reply if text_reply else "согласилась скинуть фото"
         chat_history.append({"role": "assistant", "content": history_text})
         
-        # Отправляем текстовую фразу пользователю
+        # Отправляем фразу пользователю
         message_to_send = text_reply if text_reply else "ой, сейчас попробую... 😉"
         await update.message.reply_text(message_to_send)
         
-        # Запускаем генерацию фото в фоновом режиме
+        # Генерируем и шлем фото
         asyncio.create_task(generate_and_send_photo(update, context, photo_prompt, ""))
         
         result = None
     else:
-        # Обычный текстовый ответ
+        # Обычный текст
         chat_history.append({"role": "assistant", "content": full_reply})
         result = full_reply
 
-    # 5. Ограничиваем размер истории в одном месте
+    # 5. Обрезаем историю
     if len(chat_history) > MAX_HISTORY * 2:
         chat_history = chat_history[-MAX_HISTORY * 2:]
 
     return result
+
 # --- ХЭНДЛЕРЫ TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_history
