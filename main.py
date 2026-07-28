@@ -17,6 +17,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 MODEL = "llama-3.3-70b-versatile"
 
@@ -58,22 +59,31 @@ SYSTEM_PROMPT = """Ты — девушка по имени Мила. Тебе 19
 chat_history = []
 MAX_HISTORY = 10
 
+HF_TOKEN = os.getenv("HF_TOKEN")
+# Модель FLUX.1-schnell — супер-быстрая и очень точная по анатомии
+HF_API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+
 async def generate_and_send_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, caption: str):
     try:
-        clean_prompt = prompt.replace("ФОТО_ПРОМПТ:", "").strip()
-        encoded_prompt = urllib.parse.quote(clean_prompt)
-        
-        # Используем модель flux-realism (или flux-anime если нужен аниме стиль)
-        # width=1024, height=1280 (формат портрета/селфи 4:5), seed=random для разнообразия
-        photo_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux-anime&width=1024&height=1280&nologo=true"
-        print(f"[Генерация фото]: {photo_url}")
+        clean_prompt = prompt.replace("фото_промпт:", "").strip()
+        print(f"[Запрос к HuggingFace FLUX]: {clean_prompt}")
+
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        payload = {
+            "inputs": clean_prompt,
+            "parameters": {
+                "width": 800,
+                "height": 1024,
+                "num_inference_steps": 4 # Schnell работает за 4 шага очень детально
+            }
+        }
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(photo_url) as response:
+            async with session.post(HF_API_URL, headers=headers, json=payload, timeout=40) as response:
                 if response.status == 200:
-                    image_data = await response.read()
-                    photo_file = io.BytesIO(image_data)
-                    photo_file.name = "mila_selfie.jpg"
+                    image_bytes = await response.read()
+                    photo_file = io.BytesIO(image_bytes)
+                    photo_file.name = "mila_art.jpg"
                     
                     await context.bot.send_photo(
                         chat_id=update.effective_chat.id, 
@@ -82,7 +92,9 @@ async def generate_and_send_photo(update: Update, context: ContextTypes.DEFAULT_
                         parse_mode=constants.ParseMode.HTML
                     )
                 else:
-                    await update.message.reply_text("ой, чето камера залагала... не могу сейчас скинуть :(", protect_content=False)
+                    error_text = await response.text()
+                    print(f"Ошибка HF API ({response.status}): {error_text}")
+                    await update.message.reply_text("ой, чето камера залагала... повтори еще раз чуть позже :)", protect_content=False)
     except Exception as e:
         print(f"Ошибка генерации/отправки фото: {e}")
         await update.message.reply_text("что-то пошло не так с фото, Slayks... :(", protect_content=False)
