@@ -63,65 +63,41 @@ MAX_HISTORY = 10
 async def generate_and_send_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, caption: str):
     clean_prompt = prompt.replace("фото_промпт:", "").strip()
     
-    # Формируем качественные аниме-теги
-    anime_prompt = f"masterpiece, best quality, 2D anime illustration, 1girl, {clean_prompt}"
-    negative_prompt = "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, blurred"
-
-    # Список надежных бесплатных аниме-моделей на HF (если первая лежит — берем следующую)
+    # Формируем промпт строго под аниме
+    anime_prompt = f"masterpiece, best quality, 2D anime style illustration, cute anime girl, {clean_prompt}"
+    
+    # Список актуальных рабочих моделей HuggingFace Inference API
     models = [
-        "cagliostrolab/animagine-xl-3.1",
-        "SG161222/Realistic_Vision_V5.1_noVAE",
-        "runwayml/stable-diffusion-v1-5"
+        "black-forest-labs/FLUX.1-schnell",
+        "stabilityai/stable-diffusion-xl-base-1.0"
     ]
 
-    url = "https://router.huggingface.co/hf-inference/v1/images/generations"
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     image_bytes = None
 
-    for model_name in models:
-        payload = {
-            "model": model_name,
-            "inputs": anime_prompt,
-            "parameters": {
-                "negative_prompt": negative_prompt,
-                "width": 800,
-                "height": 1024
-            }
-        }
+    for model in models:
+        url = f"https://api-inference.huggingface.co/models/{model}"
+        payload = {"inputs": anime_prompt}
         
-        # Делаем до 2 попыток на модель (на случай если она просыпается от 503)
-        for attempt in range(2):
-            try:
-                print(f"[Запрос к HF]: Модель {model_name} (Попытка {attempt + 1})")
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=headers, json=payload, timeout=35) as response:
-                        if response.status == 200:
-                            image_bytes = await response.read()
-                            print(f"[Успех]: Сгенерировано через {model_name}")
-                            break
-                        elif response.status == 503:
-                            print(f"[HF 503]: Модель {model_name} прогревается, ждем 5 сек...")
-                            await asyncio.sleep(5) # Даем модели проснуться
-                        else:
-                            err_msg = await response.text()
-                            print(f"[HF Ошибка {response.status}]: {err_msg}")
-                            break
-            except Exception as e:
-                print(f"[Ошибка сети/таймаут]: {e}")
-                
-        if image_bytes:
-            break
+        try:
+            print(f"[Запрос к HF]: {model}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload, timeout=35) as response:
+                    if response.status == 200:
+                        image_bytes = await response.read()
+                        print(f"[Успех HF]: Сгенерировано через {model}")
+                        break
+                    else:
+                        err_text = await response.text()
+                        print(f"[Ошибка {model} - {response.status}]: {err_text}")
+        except Exception as e:
+            print(f"[Ошибка сети]: {e}")
 
-    # Отправка фото, если смогли получить байты
+    # Если HuggingFace отдал байты фото
     if image_bytes and len(image_bytes) > 2000:
         try:
             photo_file = io.BytesIO(image_bytes)
-            photo_file.name = "mila_art.jpg"
-            
+            photo_file.name = "mila_anime.jpg"
             await context.bot.send_photo(
                 chat_id=update.effective_chat.id, 
                 photo=photo_file, 
@@ -130,10 +106,10 @@ async def generate_and_send_photo(update: Update, context: ContextTypes.DEFAULT_
             )
             return
         except Exception as e:
-            print(f"[Ошибка отправки в ТГ]: {e}")
+            print(f"[Ошибка отправки в Telegram]: {e}")
 
-    # Если совсем ничего не сработало
-    await update.message.reply_text("ой, чето камера залагала... повтори еще раз через пару секунд :)", protect_content=False)
+    # Если HF не сработал — отправляем понятный ответ
+    await update.message.reply_text("ой, чето камера залагала... попробуй еще раз чуть позже :)", protect_content=False)
 
 # --- РАБОТА С ПАМЯТЬЮ (SUPABASE) --- (Закомментировано, если не используешь)
 def save_memory(topic, fact, emotion=""):
