@@ -1,11 +1,13 @@
 import logging
 import re
 import os
+import time
 import asyncio
 import io
 import random
 import traceback
 import aiohttp
+import groq
 from groq import AsyncGroq
 from supabase import create_client, Client
 from telegram import Update, constants
@@ -60,6 +62,9 @@ SYSTEM_PROMPT = """Ты — девушка по имени Мила. Тебе 19
 
 chat_history = []
 MAX_HISTORY = 10
+REQUEST_WINDOW = 60
+REQUEST_LIMIT = 4
+chat_request_history = {}
 
 # --- РАБОТА С ГЕНЕРАЦИЕЙ ФОТО ---
 async def generate_and_send_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, caption: str):
@@ -241,10 +246,14 @@ async def generate_response(user_text, update: Update, context: ContextTypes.DEF
         completion = await client.chat.completions.create(
             model=MODEL,
             messages=messages,
-            temperature=0.6,
-            max_tokens=250
+            temperature=0.5,
+            max_tokens=180
         )
         full_reply = completion.choices[0].message.content if completion.choices else ""
+    except groq.RateLimitError as e:
+        print(f"Rate limit Groq: {e}")
+        traceback.print_exc()
+        return ["сейчас лимит на запросы закончился, подожди пару минут и напиши снова"]
     except Exception as e:
         print(f"Ошибка запроса к Groq: {e}")
         traceback.print_exc()
@@ -320,6 +329,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
     
+    chat_id = update.effective_chat.id
+    now_ts = time.time()
+    window = chat_request_history.get(chat_id, [])
+    window = [ts for ts in window if now_ts - ts < REQUEST_WINDOW]
+    if len(window) >= REQUEST_LIMIT:
+        await update.message.reply_text("слишком часто, подожди секунду и напиши снова")
+        return
+    window.append(now_ts)
+    chat_request_history[chat_id] = window
+
     try:
         reply = await generate_response(user_text, update, context)
         if reply:
