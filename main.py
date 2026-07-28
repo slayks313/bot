@@ -1,19 +1,25 @@
 import logging
-import sqlite3
 import re
 import os
 import asyncio
 from groq import AsyncGroq
+from supabase import create_client, Client
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Настройки берутся из переменных окружения (для безопасности)
+# --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-DB_PATH = "memory.db"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
 MODEL = "llama-3.3-70b-versatile"
 
+# Инициализация клиентов
 client = AsyncGroq(api_key=GROQ_API_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 SYSTEM_PROMPT = """Ты — девушка по имени Мила. Тебе 19 лет.
 Твоего парня зовут Slayks. Ты общаешься с ним в Telegram.
@@ -29,28 +35,17 @@ SYSTEM_PROMPT = """Ты — девушка по имени Мила. Тебе 19
 chat_history = []
 MAX_HISTORY = 10
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS memories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            topic TEXT,
-            fact TEXT,
-            emotional_context TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
+# --- РАБОТА С ПАМЯТЬЮ (SUPABASE) ---
 def save_memory(topic, fact, emotion=""):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO memories (topic, fact, emotional_context) VALUES (?, ?, ?)",
-              (topic, fact, emotion))
-    conn.commit()
-    conn.close()
+    try:
+        supabase.table("memories").insert({
+            "topic": topic,
+            "fact": fact,
+            "emotional_context": emotion
+        }).execute()
+        print(f"[Память сохранена в Supabase]: {fact}")
+    except Exception as e:
+        print(f"Ошибка сохранения в Supabase: {e}")
 
 async def extract_and_save_memory(user_text):
     extract_prompt = f"""Сообщение от Slayks: "{user_text}".
@@ -70,24 +65,28 @@ async def extract_and_save_memory(user_text):
             fact_text = result.split("ФАКТ:")[1].strip()
             if fact_text:
                 save_memory("о пользователе", fact_text, "нейтрально")
-                print(f"[Память сохранена]: {fact_text}")
     except Exception as e:
-        print(f"Ошибка сохранения памяти: {e}")
+        print(f"Ошибка извлечения памяти: {e}")
 
 def get_relevant_memories(query):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    words = [w for w in re.findall(r'\b\w+\b', query.lower()) if len(w) > 3]
-    if not words:
-        return ""
+    try:
+        words = [w for w in re.findall(r'\b\w+\b', query.lower()) if len(w) > 3]
+        if not words:
+            return ""
+            
+        # Формируем ilike поиск для Supabase
+        filters_list = [f"fact.ilike.%{w}%" for w in words]
+        filter_str = ",".join(filters_list)
         
-    conditions = " OR ".join(["fact LIKE ?"] * len(words))
-    params = [f"%{w}%" for w in words]
-    c.execute(f"SELECT fact FROM memories WHERE {conditions} ORDER BY timestamp DESC LIMIT 3", params)
-    rows = c.fetchall()
-    conn.close()
-    return "\n".join([row[0] for row in rows])
+        response = supabase.table("memories").select("fact").or_(filter_str).order("timestamp", desc=True).limit(3).execute()
+        
+        if response.data:
+            return "\n".join([row["fact"] for row in response.data])
+    except Exception as e:
+        print(f"Ошибка получения памяти из Supabase: {e}")
+    return ""
 
+# --- ГЕНЕРАЦИЯ ОТВЕТА ---
 async def generate_response(user_text):
     global chat_history
     
@@ -117,6 +116,7 @@ async def generate_response(user_text):
     asyncio.create_task(extract_and_save_memory(user_text))
     return reply
 
+# --- ХЭНДЛЕРЫ TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_history
     chat_history = []
@@ -133,9 +133,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Ошибка в боте: {e}")
         await update.message.reply_text("ой, чето связь подлагивает... повтори еще раз :)")
 
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -143,21 +141,18 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
 def run_health_check():
-    # Render передаёт порт в переменную PORT, по умолчанию берем 10000
     port = int(os.getenv("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# Запускаем пинг-сервер в отдельном потоке перед стартом бота
 Thread(target=run_health_check, daemon=True).start()
 
 if __name__ == "__main__":
-    init_db()
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
     
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 Мила запущен на Render 24/7!")
+    print("🚀 Мила запущен с Supabase 24/7!")
     app.run_polling()
