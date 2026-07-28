@@ -3,6 +3,7 @@ import re
 import os
 import asyncio
 import io
+import random
 import aiohttp
 from groq import AsyncGroq
 from supabase import create_client, Client
@@ -138,23 +139,68 @@ def get_relevant_memories(query):
         print(f"Ошибка получения памяти из Supabase: {e}")
     return ""
 # --- ГЕНЕРАЦИЯ ОТВЕТА ---
-def split_reply_into_messages(text: str):
+def reduce_emoji_count(text: str) -> str:
+    emojis = ["❤️", "😉", "🥰", "😏", "🙂", "😊", "😳", "😅", "😜", "😘", "😇", "😈", "😌", "😔", "😴", "🥲", "😒", "😞", "😂", "🤭", "😍"]
+    pattern = re.compile("|".join(map(re.escape, emojis)))
+    found = pattern.findall(text)
+    if len(found) <= 1:
+        return text
+
+    first = found[0]
+    text = pattern.sub("", text)
+    text = f"{first} {text}".strip()
+    return text
+
+
+def trim_trailing_fragment(text: str) -> str:
+    text = re.sub(r'(\s*[,;:-]?\s*\b(и ещё сообщение|и еще сообщение|и ещё|и еще|ещё|еще|и|а|ну|так)\b\s*)+$', '', text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+def clean_reply_text(text: str) -> str:
     text = text.strip()
+    text = trim_trailing_fragment(text)
+    text = reduce_emoji_count(text)
+    return text
+
+
+def finish_chunk_naturally(chunk: str, is_last: bool) -> str:
+    chunk = chunk.strip()
+    if not is_last and len(chunk) > 30 and not re.search(r'[.!?…]$', chunk):
+        if random.random() < 0.45:
+            return chunk + "..."
+    return chunk
+
+
+def split_reply_into_messages(text: str):
+    text = clean_reply_text(text)
     if not text:
         return []
 
     # Сначала делим по явным абзацам
     paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
     if len(paragraphs) > 1:
-        return paragraphs
+        return [finish_chunk_naturally(p, i == len(paragraphs) - 1) for i, p in enumerate(paragraphs)]
 
     # Иначе делим по предложениям
-    sentences = re.findall(r'[^.!?…]+[.!?…]?(?=\s|$)', text, flags=re.S)
+    sentences = [s.strip() for s in re.findall(r'[^.!?…]+[.!?…]?(?=\s|$)', text, flags=re.S) if s.strip()]
     if len(sentences) > 1:
-        messages = [s.strip() for s in sentences if s.strip()]
-        return messages
+        return [finish_chunk_naturally(s, i == len(sentences) - 1) for i, s in enumerate(sentences)]
 
-    # Если всё ещё одна длинная строка, делим по словам, чтобы сделать несколько сообщений
+    # Если есть длинная строка, разбиваем логично по запятым или союзам
+    if len(text) > 80:
+        split_point = None
+        for pattern in [r',\s*', r'\s+и\s+', r'\s+а\s+', r'\s+но\s+']:
+            for m in re.finditer(pattern, text):
+                if 30 < m.start() < len(text) - 30:
+                    split_point = m.start() + 1
+        if split_point:
+            first = text[:split_point].strip()
+            second = text[split_point:].strip()
+            if first and second:
+                return [finish_chunk_naturally(first, False), finish_chunk_naturally(second, True)]
+
+    # Иначе делим по словам, чтобы сделать несколько сообщений
     if len(text) > 120:
         words = text.split()
         chunks = []
@@ -171,7 +217,7 @@ def split_reply_into_messages(text: str):
         if current:
             chunks.append(current)
         if len(chunks) > 1:
-            return chunks
+            return [finish_chunk_naturally(chunk, i == len(chunks) - 1) for i, chunk in enumerate(chunks)]
 
     return [text]
 
@@ -250,6 +296,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_history = []
     await update.message.reply_text("привееет) ты чего так долго не писал? скучала по тебе 🥰")
 
+async def send_split_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, parts):
+    for part in parts:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+        await update.message.reply_text(part)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     if not user_text:
@@ -261,8 +314,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = await generate_response(user_text, update, context)
         if reply:
             parts = reply if isinstance(reply, list) else split_reply_into_messages(reply)
-            for part in parts:
-                await update.message.reply_text(part)
+            await send_split_reply(update, context, parts)
     except Exception as e:
         print(f"Ошибка в боте: {e}")
         await update.message.reply_text("ой, чето связь подлагивает... повтори еще раз :)")
