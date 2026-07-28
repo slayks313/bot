@@ -133,12 +133,13 @@ def get_relevant_memories(query):
         print(f"Ошибка получения памяти из Supabase: {e}")
     return ""
 
-# --- ГЕНЕРАЦИЯ ОТВЕТА ---
+# --- ОБНОВЛЕННАЯ СУПЕР-НАДЕЖНАЯ ФУНКЦИЯ ГЕНЕРАЦИИ ОТВЕТА ---
 async def generate_response(user_text, update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_history
     
     memories = get_relevant_memories(user_text) # Раскомментируй, если используешь память
     memory_context = f"\n[Факты о Slayks: {memories}]" if memories else ""
+    memory_context = "" # Временная заглушка, если память отключена
     current_system_prompt = SYSTEM_PROMPT + memory_context
     
     messages = [{"role": "system", "content": current_system_prompt}]
@@ -153,6 +154,50 @@ async def generate_response(user_text, update: Update, context: ContextTypes.DEF
     )
     
     full_reply = completion.choices[0].message.content
+    print(f"[Ответ Groq]: {full_reply}") # Для отладки в логах Render
+
+    # --- УЛУЧШЕННАЯ ЛОГИКА ПОИСКА ПРОМПТА (ФОТО) ---
+    # Ищем разные варианты маркера начала промпта
+    photo_markers = ["ФОТО_ПРОМПТ:", "Фото:", "фото:", "Photo:", "photo:"]
+    target_marker = None
+    
+    for marker in photo_markers:
+        if marker in full_reply:
+            target_marker = marker
+            break
+            
+    if target_marker:
+        # Мы нашли маркер фото!
+        
+        # Разделяем текст ответа и промпт по найденному маркеру
+        parts = full_reply.split(target_marker)
+        text_reply = parts[0].strip() # Текст ДО маркера (например, "ой, сейчас попробую... ;)")
+        photo_prompt = parts[1].strip() # Текст ПОСЛЕ маркера (сам английский промпт)
+        
+        # Записываем в историю только текст ответа (или заглушку, если текста нет)
+        history_text = text_reply if text_reply else "согласилась скинуть фото"
+        chat_history.append({"role": "user", "content": user_text})
+        chat_history.append({"role": "assistant", "content": history_text})
+        
+        # Отправляем фото в фоновом режиме. 
+        # Текст Милы (text_reply) уходит как подпись к фото (caption).
+        if not text_reply:
+            text_reply = "лови фото 😉" # Дефолтная подпись, если Groq ничего не родил
+
+        asyncio.create_task(generate_and_send_photo(update, context, photo_prompt, text_reply))
+        
+        # Чтобы избежать двойного ответа в handle_message, возвращаем None
+        return None 
+    else:
+        # Обычный текстовый ответ (фото не просили)
+        chat_history.append({"role": "user", "content": user_text})
+        chat_history.append({"role": "assistant", "content": full_reply})
+        
+        if len(chat_history) > MAX_HISTORY * 2:
+            chat_history = chat_history[-MAX_HISTORY * 2:]
+            
+        asyncio.create_task(extract_and_save_memory(user_text)) # Раскомментируй, если используешь память
+        return full_reply
     
     # Обработка фото
     if "ФОТО_ПРОМПТ:" in full_reply:
