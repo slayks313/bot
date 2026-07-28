@@ -17,7 +17,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-HF_TOKEN = os.getenv("HF_TOKEN")
+
 
 MODEL = "llama-3.3-70b-versatile"
 
@@ -61,55 +61,32 @@ MAX_HISTORY = 10
 
 # --- РАБОТА С ГЕНЕРАЦИЕЙ ФОТО ---
 async def generate_and_send_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, caption: str):
-    clean_prompt = prompt.replace("фото_промпт:", "").strip()
-    
-    # Формируем промпт строго под аниме
-    anime_prompt = f"masterpiece, best quality, 2D anime style illustration, cute anime girl, {clean_prompt}"
-    
-    # Список актуальных рабочих моделей HuggingFace Inference API
-    models = [
-        "black-forest-labs/FLUX.1-schnell",
-        "stabilityai/stable-diffusion-xl-base-1.0"
-    ]
-
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    image_bytes = None
-
-    for model in models:
-        url = f"https://api-inference.huggingface.co/models/{model}"
-        payload = {"inputs": anime_prompt}
+    try:
+        clean_prompt = prompt.replace("ФОТО_ПРОМПТ:", "").strip()
+        encoded_prompt = urllib.parse.quote(clean_prompt)
         
-        try:
-            print(f"[Запрос к HF]: {model}")
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload, timeout=35) as response:
-                    if response.status == 200:
-                        image_bytes = await response.read()
-                        print(f"[Успех HF]: Сгенерировано через {model}")
-                        break
-                    else:
-                        err_text = await response.text()
-                        print(f"[Ошибка {model} - {response.status}]: {err_text}")
-        except Exception as e:
-            print(f"[Ошибка сети]: {e}")
+        # Передаем model=flux-anime для чистого 2D-рисунка
+        photo_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux-anime&width=1024&height=1280&nologo=true"
+        print(f"[Генерация аниме-фото]: {photo_url}")
 
-    # Если HuggingFace отдал байты фото
-    if image_bytes and len(image_bytes) > 2000:
-        try:
-            photo_file = io.BytesIO(image_bytes)
-            photo_file.name = "mila_anime.jpg"
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id, 
-                photo=photo_file, 
-                caption=caption,
-                parse_mode=constants.ParseMode.HTML
-            )
-            return
-        except Exception as e:
-            print(f"[Ошибка отправки в Telegram]: {e}")
-
-    # Если HF не сработал — отправляем понятный ответ
-    await update.message.reply_text("ой, чето камера залагала... попробуй еще раз чуть позже :)", protect_content=False)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(photo_url) as response:
+                if response.status == 200:
+                    image_data = await response.read()
+                    photo_file = io.BytesIO(image_data)
+                    photo_file.name = "mila_anime.jpg"
+                    
+                    await context.bot.send_photo(
+                        chat_id=update.effective_chat.id, 
+                        photo=photo_file, 
+                        caption=caption,
+                        parse_mode=constants.ParseMode.HTML
+                    )
+                else:
+                    await update.message.reply_text("ой, чето срисовка залагала... не могу сейчас скинуть :(", protect_content=False)
+    except Exception as e:
+        print(f"Ошибка генерации/отправки фото: {e}")
+        await update.message.reply_text("что-то пошло не так с артом, Slayks... :(", protect_content=False)
 
 # --- РАБОТА С ПАМЯТЬЮ (SUPABASE) --- (Закомментировано, если не используешь)
 def save_memory(topic, fact, emotion=""):
